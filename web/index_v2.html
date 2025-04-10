@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 LED Controller</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            text-align: center;
+        }
+        .slider-container {
+            margin: 30px auto;
+            width: 80%;
+            max-width: 400px;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+        .brightness-slider {
+            width: 100%;
+            margin-top: 30px;
+        }
+        #status {
+            margin-top: 20px;
+            font-style: italic;
+            color: #666;
+        }
+        #connectionButton {
+            border: none;
+            color: white;
+            padding: 15px 32px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 8px;
+            background-color: #4CAF50;
+        }
+        .disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <h1>ESP32 LED Controller</h1>
+    <div>
+        <button id="connectionButton">Connect to BLE Device</button>
+    </div>
+    <div class="slider-container">
+        <h3>LED Power</h3>
+        <label class="switch">
+            <input type="checkbox" id="ledToggle" disabled>
+            <span class="slider"></span>
+        </label>
+        
+        <h3>Brightness</h3>
+        <input type="range" min="0" max="255" value="128" class="brightness-slider" id="brightnessSlider" disabled>
+        <p>Value: <span id="brightnessValue">128</span></p>
+    </div>
+    <div id="status">Not connected</div>
+
+    <script>
+        let ledCharacteristic;
+        let brightnessCharacteristic;
+        let device;
+        let isConnected = false;
+        const serviceUuid = '19b10000-e8f2-537e-4f6c-d104768a1214';
+        const ledStateUuid = '19b10001-e8f2-537e-4f6c-d104768a1214';
+        const brightnessUuid = '19b10002-e8f2-537e-4f6c-d104768a1214';
+
+        document.getElementById('connectionButton').addEventListener('click', toggleConnection);
+        document.getElementById('ledToggle').addEventListener('change', toggleLed);
+        document.getElementById('brightnessSlider').addEventListener('input', updateBrightnessValue);
+        document.getElementById('brightnessSlider').addEventListener('change', setBrightness);
+
+        async function toggleConnection() {
+            if (isConnected) {
+                await disconnectFromBle();
+            } else {
+                await connectToBle();
+            }
+        }
+
+        async function connectToBle() {
+            try {
+                document.getElementById('status').textContent = 'Connecting...';
+                document.getElementById('connectionButton').disabled = true;
+                
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{
+                        services: [serviceUuid],
+                        name: 'ESP32_LED_CTRL'
+                    }],
+                    optionalServices: [serviceUuid]
+                });
+                
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(serviceUuid);
+                
+                ledCharacteristic = await service.getCharacteristic(ledStateUuid);
+                brightnessCharacteristic = await service.getCharacteristic(brightnessUuid);
+                
+                // Read initial values
+                const ledState = await ledCharacteristic.readValue();
+                document.getElementById('ledToggle').checked = ledState.getUint8(0) === 1;
+                
+                const brightness = await brightnessCharacteristic.readValue();
+                const brightnessValue = brightness.getUint8(0);
+                document.getElementById('brightnessSlider').value = brightnessValue;
+                document.getElementById('brightnessValue').textContent = brightnessValue;
+                
+                // Enable controls
+                document.getElementById('ledToggle').disabled = false;
+                document.getElementById('brightnessSlider').disabled = !document.getElementById('ledToggle').checked;
+                
+                // Listen for notifications
+                await ledCharacteristic.startNotifications();
+                ledCharacteristic.addEventListener('characteristicvaluechanged', handleLedStateChange);
+                
+                await brightnessCharacteristic.startNotifications();
+                brightnessCharacteristic.addEventListener('characteristicvaluechanged', handleBrightnessChange);
+                
+                // Update UI
+                document.getElementById('status').textContent = 'Connected to ESP32 LED Controller';
+                document.getElementById('connectionButton').textContent = 'Disconnect';
+                document.getElementById('connectionButton').style.backgroundColor = '#f44336';
+                document.getElementById('connectionButton').disabled = false;
+                
+                isConnected = true;
+                
+                // Handle disconnection
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+            } catch (error) {
+                console.error('Connection error:', error);
+                document.getElementById('status').textContent = 'Connection failed: ' + error;
+                document.getElementById('connectionButton').disabled = false;
+                isConnected = false;
+            }
+        }
+
+        async function disconnectFromBle() {
+            try {
+                document.getElementById('status').textContent = 'Disconnecting...';
+                document.getElementById('connectionButton').disabled = true;
+                
+                if (device && device.gatt.connected) {
+                    // Remove event listeners
+                    if (ledCharacteristic) {
+                        ledCharacteristic.removeEventListener('characteristicvaluechanged', handleLedStateChange);
+                    }
+                    if (brightnessCharacteristic) {
+                        brightnessCharacteristic.removeEventListener('characteristicvaluechanged', handleBrightnessChange);
+                    }
+                    
+                    // Disconnect
+                    await device.gatt.disconnect();
+                }
+                
+                onDisconnected();
+            } catch (error) {
+                console.error('Disconnection error:', error);
+                document.getElementById('status').textContent = 'Disconnection failed: ' + error;
+                document.getElementById('connectionButton').disabled = false;
+            }
+        }
+
+        function handleLedStateChange(event) {
+            const value = event.target.value.getUint8(0);
+            document.getElementById('ledToggle').checked = value === 1;
+            document.getElementById('brightnessSlider').disabled = !document.getElementById('ledToggle').checked;
+        }
+
+        function handleBrightnessChange(event) {
+            const value = event.target.value.getUint8(0);
+            document.getElementById('brightnessSlider').value = value;
+            document.getElementById('brightnessValue').textContent = value;
+        }
+
+        async function toggleLed() {
+            if (!ledCharacteristic) return;
+            
+            const value = document.getElementById('ledToggle').checked ? 1 : 0;
+            document.getElementById('brightnessSlider').disabled = !document.getElementById('ledToggle').checked;
+            
+            try {
+                await ledCharacteristic.writeValue(new Uint8Array([value]));
+            } catch (error) {
+                console.error('Error toggling LED:', error);
+                document.getElementById('status').textContent = 'Error toggling LED: ' + error;
+            }
+        }
+
+        function updateBrightnessValue() {
+            const value = document.getElementById('brightnessSlider').value;
+            document.getElementById('brightnessValue').textContent = value;
+        }
+
+        async function setBrightness() {
+            if (!brightnessCharacteristic) return;
+            
+            const value = parseInt(document.getElementById('brightnessSlider').value);
+            
+            try {
+                await brightnessCharacteristic.writeValue(new Uint8Array([value]));
+            } catch (error) {
+                console.error('Error setting brightness:', error);
+                document.getElementById('status').textContent = 'Error setting brightness: ' + error;
+            }
+        }
+
+        function onDisconnected() {
+            document.getElementById('status').textContent = 'Disconnected';
+            document.getElementById('connectionButton').textContent = 'Connect to BLE Device';
+            document.getElementById('connectionButton').style.backgroundColor = '#4CAF50';
+            document.getElementById('connectionButton').disabled = false;
+            
+            document.getElementById('ledToggle').disabled = true;
+            document.getElementById('brightnessSlider').disabled = true;
+            
+            ledCharacteristic = null;
+            brightnessCharacteristic = null;
+            device = null;
+            isConnected = false;
+        }
+    </script>
+</body>
+</html>
