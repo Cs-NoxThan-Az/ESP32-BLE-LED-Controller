@@ -19,4 +19,4 @@ The intuitive web interface provides:
 - Current value display
 - One-click BLE pairing
 
-(Note: Add the actual `image.png` file to your repository in the same directory as README.md)
+
